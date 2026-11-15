@@ -1,82 +1,140 @@
-﻿# GreenData AI
+# GreenData AI
 
-Scan a folder, see which files are duplicates, stale or sensitive, preview the savings, and apply only what you approve.
-Everything is reversible, and the impact (storage, time, energy, CO2, cost) is reported net of the tool's own overhead.
+**Keep the data that earns its place.**
 
-The project has two parts that work together:
+[![tests](https://github.com/vanshitachoudhary/greendata-ai/actions/workflows/tests.yml/badge.svg)](https://github.com/vanshitachoudhary/greendata-ai/actions/workflows/tests.yml)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-- **Frontend:** the dashboard, `greendata_prototype.html`, served by the backend.
-- **Backend:** `greendata.py`, a Python tool with a local API and a command line. Standard library only.
+GreenData AI scans a folder, finds duplicates, near-duplicates, stale files and sensitive files, scores every file,
+and recommends safe, reversible optimizations. It reports the storage, time, energy, CO2 and cost impact, net of the
+tool's own overhead. Nothing changes until you approve it, and everything can be rolled back.
 
-## Live demo
+**[Live demo](https://vanshitachoudhary.github.io/greendata-ai/)** (runs in your browser with a sample folder and a guided tour).
+The online demo cannot touch your files. Scanning and changing real folders runs on your own computer, see [Quick start](#quick-start).
 
-Browser-only demo (sample folder, drag and drop analysis, guided tour): https://vanshitachoudhary.github.io/greendata-ai/
+## Features
 
-The online demo cannot touch your files. Scanning, compressing and rolling back real folders needs the backend,
-which runs on your own computer (Quick start below). That is deliberate: a public server must never read your disk.
+- **Duplicate detection:** exact copies by SHA-256, near-copies by MinHash LSH confirmed with exact Jaccard similarity.
+- **Sensitive data protection:** email, Indian mobile numbers, Aadhaar (checksum validated) and PAN. These files are never changed.
+- **Data Value Score (0-100):** relevance, access, recency and size, with a duplicate penalty. Relevant data used in the last 90 days is never archived.
+- **Real optimization:** duplicates are moved aside, stale files are archived, large files are compressed (lzma, or zstd if installed). Files that are already compressed are left alone.
+- **Safe by design:** dry run first, per-file approval, hash verification before any original is removed, full rollback, audit log.
+- **Impact report:** storage, time, energy, CO2 and cost before and after, per region, net of the scan's own energy.
+- **Explainable:** every recommendation comes with a reason, and each score can be opened to see how it was built.
+- **Web dashboard and command line**, plus a benchmark harness for measured experiments.
 
-## Quick start (web app)
-
-1. Install Python 3.9 or newer (tested on 3.11 and 3.12).
-2. Double click `run.bat` (Windows), or run `sh run.sh` (Mac/Linux), or run `python greendata.py serve`.
-3. Your browser opens the app. Press **Use sample folder** to look around, or type a folder path under
-   **Scan a real folder on this computer** and press **Scan folder**.
-4. Review the plan, untick anything you do not want, press **Apply approved changes**.
-   Press **Roll back** to undo. Files are moved or compressed, never deleted.
-
-Try it first on the demo folder: `python greendata.py demo ./demo_folder`, then scan `./demo_folder`.
-Use the **Energy model what-if** box to see the model on a larger folder, clearly labelled as a what-if.
-
-The server listens on 127.0.0.1 only, rejects other host names, and the page carries a random token,
-so other websites cannot call it.
-
-The HTML file also opens on its own (double click). Without the backend it shows the sample folder and
-analyzes files you drop in inside the browser, with no real changes. The scan-a-folder box appears only when the backend is running.
-
-## Command line
+## How it works
 
 ```
-python greendata.py serve                                   # web app (UI + backend)
-python greendata.py demo ./demo_folder                      # make a messy sample folder
-python greendata.py scan ./demo_folder --keywords sales     # dry run: plan + JSON report, nothing changes
-python greendata.py apply ./demo_folder --keywords sales    # asks first, then applies (reversible)
-python greendata.py rollback ./demo_folder                  # restores every file, verified by SHA-256
-python -m unittest -v                                       # run the tests (16)
-python benchmark.py synthetic --sizes 100,500,2000 --runs 3 # measured results for a paper (see PAPER_GUIDE.md)
+scan -> fingerprint (SHA-256) -> exact + near duplicates -> sensitive-data check -> Data Value Score
+     -> decision -> dry run -> apply (verified, reversible) -> before/after impact -> rollback if needed
 ```
 
-Useful options: `--region India|USA|EU|Norway`, `--runs 4`, `--threshold 35`, `--weights 35,25,25,15`,
-`--acc 2`, `--extrapolate N`, `--apply-near`, `--measure`.
-
-Optional: `pip install zstandard codecarbon`. With zstandard, compression uses zstd instead of lzma.
-With codecarbon, `apply --measure` also records measured energy.
-
-## What it does
-
-| Step | How |
+| Condition | Action |
 |---|---|
-| Exact duplicates | SHA-256 of every file. The copy kept is the one without copy/backup/final/old in its name, then the most recently used. |
-| Near-duplicates | 3-word shingles, MinHash LSH to find candidates, confirmed with exact Jaccard (default 80%). |
-| Sensitive data | Email, Indian mobile (10 digits starting 6-9), Aadhaar (12 digits with a valid Verhoeff checksum), PAN. These files are never changed. |
-| Relevance | Share of your keywords found in the name and content (0.6 if none given). |
-| Data Value Score | 0-100 from relevance, access, recency and small size, minus a duplicate penalty. |
-| Recency of relevant data | A file that is relevant (0.7 or more) and used within 90 days is never archived or compressed. |
-| Compression | Real codec measured on a 1 MB sample. Files that are already compressed are left alone. |
-| Apply | Duplicates go to `.greendata/trash`, archived files to `.greendata/archive`, compressed files stay in place with a `.xz` or `.zst` extension. Each is verified by hash before the original is removed, and files changed since the scan are skipped. |
-| Rollback | Restores from the manifest and verifies every hash. Every action is written to `.greendata/audit.log`. |
+| Contains sensitive data | Protect, never changed automatically |
+| Exact copy of another file | Deduplicate (moved to `.greendata/trash`) |
+| Near-copy of another file | Recommend merge (applied only if you tick it) |
+| Low score, not relevant-and-recent | Archive (compressed into `.greendata/archive`) |
+| Large and rarely opened | Compress in place |
+| Everything else | Keep |
 
-## Experiments and results
+## Quick start
 
-`benchmark.py` runs measured experiments (detection quality against ground truth, storage saved, time, safety, energy,
-rollback) next to two simple baselines, on synthetic data or on a real folder. `PAPER_GUIDE.md` explains how to turn that
-into results for a paper. Dashboard figures for energy, CO2 and cost are assumptions, not results.
+Requires Python 3.9 or newer. No packages to install.
 
-## Honest limits
+```
+python greendata.py serve
+```
 
-- Operating systems rarely record how many times a file was opened, so access frequency is assumed (`--acc`, default 2 per month). "Last used" comes from the access and modified times, and scanning does not change them where the system allows it.
-- Energy, CO2 and cost use assumed constants (listed in the JSON report). `apply --measure` records measured energy only if CodeCarbon is installed. Without it you get a CPU-time estimate. Carbon intensity values per region are illustrative.
-- On small folders the fixed per-run overhead dominates, so the percentages look tiny. The what-if scale shows the model on larger data and says so.
-- Near-duplicates are applied only if you tick them in the UI, or pass `--apply-near`.
-- Phone detection is pattern based, so order numbers and similar 10-digit numbers get flagged (measured precision about 0.6 on our decoy test, recall 1.0). It errs on the side of protecting files.
-- Nothing is deleted permanently. To free the space for good, empty `.greendata/trash` and `.greendata/archive` yourself.
-- Tested on Linux with Python 3.12 using the standard library only. The CodeCarbon and zstandard paths, and Windows/macOS behaviour, have not been run here.
+Your browser opens the dashboard. Use **Use sample folder** to look around, or type a folder path under
+**Scan a real folder on this computer**. Review the plan, untick anything you do not want, and press
+**Apply approved changes**. **Roll back** restores everything.
+
+On Windows you can also double click `run.bat`. To try it on safe data first:
+
+```
+python greendata.py demo demo_folder
+```
+
+### Command line
+
+```
+python greendata.py scan  ./folder --keywords sales,invoice    # dry run, writes a JSON report
+python greendata.py apply ./folder --keywords sales,invoice    # asks first, then applies (reversible)
+python greendata.py rollback ./folder                          # restores every file, verified by SHA-256
+python -m unittest -v                                          # 16 tests
+```
+
+Options: `--region India|USA|EU|Norway`, `--runs 4`, `--threshold 35`, `--weights 35,25,25,15`, `--acc 2`,
+`--extrapolate N`, `--apply-near`, `--measure`. Optional extras: `pip install zstandard codecarbon`
+(zstd compression, and measured energy with `apply --measure`).
+
+## Safety model
+
+- Dry run by default. Apply is a separate, explicit step with per-file approval.
+- Before an original is removed, the compressed copy is decompressed and its SHA-256 is checked. Files that changed since the scan are skipped.
+- Nothing is permanently deleted. Moved and archived files live in `.greendata/` until you remove them.
+- Rollback restores from a manifest and verifies every hash. Every action is written to `.greendata/audit.log`.
+- The local server listens on 127.0.0.1 only, rejects other host names, and the page carries a random token, so other websites cannot call it.
+
+## Evaluation
+
+`benchmark.py` runs measured experiments on labelled synthetic data (known copies, near-copies, sensitive files, decoys,
+stale and important files) or on a real folder, next to two simple baselines. `PAPER_GUIDE.md` explains how to use it for a paper.
+
+```
+python benchmark.py synthetic --sizes 100,500,2000 --runs 3 --out results
+python benchmark.py real --dir path/to/dataset --sample-audit 50
+```
+
+Preliminary run on synthetic data (Linux, 1 CPU, Python 3.12, mean over 3 seeds, 2000 files, 12 MB). Rerun on your own machine for your own numbers.
+
+| Metric | GreenData AI | Hash-only dedup | Compress-all |
+|---|---|---|---|
+| Storage saved | 22.0% | 9.3% | 28.6% |
+| Protected files changed (of 240) | 0 | not protected | 240 |
+| Exact duplicates, precision / recall | 1.00 / 1.00 | | |
+| Near-duplicates, precision / recall | 0.99 / 0.99 | | |
+| Rollback restored every byte | 3 of 3 runs | | |
+
+Honest reading: compress-all saves more space but changes every file, including protected ones. Sensitive-file precision
+was about 0.6 on our decoy test (recall 1.0), and the tool is slower than the baselines. See the limitations below.
+Energy, CO2 and cost shown in the dashboard come from assumed constants and are estimates, not measurements.
+Full tables are in [`results_example/`](results_example/).
+
+## Project structure
+
+```
+greendata.py                 backend: scanner, scoring, apply, rollback, local web server, CLI
+greendata_prototype.html     dashboard (served by the backend, also works standalone)
+benchmark.py                 measured experiments
+test_greendata.py            16 tests (unit, API, security, benchmark smoke test)
+PAPER_GUIDE.md               how to produce and report results
+docs/index.html              copy of the dashboard for GitHub Pages
+results_example/             example benchmark output
+.github/workflows/tests.yml  CI on Linux and Windows
+```
+
+## Limitations
+
+- Access frequency is assumed (`--acc`, default 2 opens per month) because file systems do not record it. "Last used" comes from file times.
+- Energy, CO2 and cost use assumed constants and illustrative regional carbon intensities. `--measure` records measured energy only if CodeCarbon is installed.
+- Phone detection is pattern based, so order numbers can be flagged. The tool errs on the side of protecting files.
+- Near-duplicate search is pure Python and slow on large folders. Relevance is keyword based.
+- Near-duplicates are applied only if you tick them. Small folders show tiny percentages because fixed per-run overhead dominates; `--extrapolate` gives a labelled what-if.
+- Tested on Linux with the standard library only. CodeCarbon, zstandard and macOS paths have not been run.
+
+## Roadmap
+
+- Faster near-duplicate search and embedding-based relevance
+- Caching and incremental processing
+- Score weight controls in the dashboard
+- Cloud storage connectors
+- A downstream energy experiment (train on original vs optimized data, measured with CodeCarbon)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
