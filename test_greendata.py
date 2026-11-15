@@ -47,6 +47,15 @@ class GreenDataTests(unittest.TestCase):
         self.assertIn("email", c.pii)
         self.assertEqual(c.action, "protect")
 
+    def test_aadhaar_needs_a_valid_checksum(self):
+        self.assertTrue(g.verhoeff_ok("2363"))
+        self.assertFalse(g.verhoeff_ok("2364"))
+        base = "23456789012"
+        valid = next(base + str(d) for d in range(10) if g.verhoeff_ok(base + str(d)))
+        invalid = next(base + str(d) for d in range(10) if not g.verhoeff_ok(base + str(d)))
+        self.assertIn("aadhaar", g.has_pii("id " + valid))
+        self.assertNotIn("aadhaar", g.has_pii("tracking " + invalid))
+
     def test_relevant_recent_data_is_never_archived(self):
         by, _, _ = self.scan(g.Cfg(keywords=["sales", "forecast"], threshold=95))
         n = by["notes/experiment_notes.txt"]
@@ -181,3 +190,15 @@ class ServerTests(unittest.TestCase):
         st, d4 = self.call("POST", "/api/rollback", dict(dir=self.root))
         self.assertEqual(st, 200)
         self.assertEqual(before, tree_hashes(self.root))
+
+
+class BenchmarkSmoke(unittest.TestCase):
+    def test_small_synthetic_run_is_safe_and_reversible(self):
+        import benchmark as b
+        with tempfile.TemporaryDirectory() as tmp:
+            labels = b.build_dataset(tmp, 80, 5)
+            row, _ = b.run_once(tmp, labels, 5, 80)
+        self.assertTrue(row["rollback_ok"])
+        self.assertEqual(row["unsafe_changes"], 0)
+        self.assertGreaterEqual(row["exact_f1"], 0.99)
+        self.assertGreater(row["saved_pct"], row["hash_only_saved_pct"])

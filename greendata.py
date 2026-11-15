@@ -47,13 +47,39 @@ ASSUME = dict(proc_kwh_gb=0.05, store_kwh_gb_month=0.01, fixed_kwh_run=0.2, min_
 PII_RE = {
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
     "phone": re.compile(r"(?<!\d)[6-9]\d{9}(?!\d)"),
-    "aadhaar-like": re.compile(r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)"),
+    "aadhaar": re.compile(r"(?<!\d)[2-9]\d{3}\s?\d{4}\s?\d{4}(?!\d)"),
     "PAN": re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"),
 }
 ALREADY_COMPRESSED = {"zip", "gz", "xz", "zst", "bz2", "7z", "rar", "jpg", "jpeg", "png", "gif", "webp", "mp4", "mp3", "docx", "xlsx", "pptx"}
 
 
 # ----------------------------------------------------------------------------- helpers
+_VD = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 0, 6, 7, 8, 9, 5], [2, 3, 4, 0, 1, 7, 8, 9, 5, 6], [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+       [4, 0, 1, 2, 3, 9, 5, 6, 7, 8], [5, 9, 8, 7, 6, 0, 4, 3, 2, 1], [6, 5, 9, 8, 7, 1, 0, 4, 3, 2], [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+       [8, 7, 6, 5, 9, 3, 2, 1, 0, 4], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]]
+_VP = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 5, 7, 6, 2, 8, 3, 0, 9, 4], [5, 8, 0, 3, 7, 9, 6, 1, 4, 2], [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+       [9, 4, 5, 3, 1, 2, 6, 8, 7, 0], [4, 2, 8, 6, 5, 7, 3, 9, 0, 1], [2, 7, 9, 3, 8, 0, 6, 4, 1, 5], [7, 0, 4, 6, 9, 1, 3, 2, 5, 8]]
+
+
+def verhoeff_ok(digits):
+    """Aadhaar numbers end in a Verhoeff check digit, so random 12-digit numbers rarely pass."""
+    c = 0
+    for i, ch in enumerate(reversed(digits)):
+        c = _VD[c][_VP[i % 8][int(ch)]]
+    return c == 0
+
+
+def has_pii(text):
+    found = []
+    for k, rx in PII_RE.items():
+        if k == "aadhaar":
+            if any(verhoeff_ok(re.sub(r"\s", "", m.group())) for m in rx.finditer(text)):
+                found.append(k)
+        elif rx.search(text):
+            found.append(k)
+    return found
+
+
 def ftype(ext):
     if ext in ("csv", "tsv"):
         return "csv"
@@ -193,7 +219,7 @@ def analyze(f, cfg):
                 buf.append(chunk)
     f.sha = h.hexdigest()
     text = b"".join(buf).decode("utf-8", "ignore") if buf else ""
-    f.pii = [k for k, rx in PII_RE.items() if text and rx.search(text)]
+    f.pii = has_pii(text) if text else []
     if cfg.keywords:
         hay = (f.rel + " " + text[:200000]).lower()
         f.relevance = 0.15 + 0.85 * sum(k in hay for k in cfg.keywords) / len(cfg.keywords)
