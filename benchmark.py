@@ -16,9 +16,11 @@ import csv
 import gzip
 import hashlib
 import json
+import math
 import os
 import platform
 import random
+import re
 import shutil
 import statistics
 import sys
@@ -233,9 +235,9 @@ def run_once(root, labels, seed, n):
         except Exception:
             pass
     changed_tree = tree_hashes(root)
-    t2 = time.perf_counter()
+    t2, rc0 = time.perf_counter(), time.process_time()
     rb = g.rollback(root)
-    rollback_s = time.perf_counter() - t2
+    rollback_s, rollback_cpu = time.perf_counter() - t2, time.process_time() - rc0
     ok = tree_hashes(root) == before_tree
     total, hash_only, gzip_all = baselines(root, files)
     row = dict(n_files=len(files), seed=seed, total_bytes=total, scan_s=scan_s, apply_s=apply_s, rollback_s=rollback_s,
@@ -244,6 +246,9 @@ def run_once(root, labels, seed, n):
                hash_only_saved_pct=100 * hash_only["saved"] / total, hash_only_s=hash_only["seconds"],
                gzip_all_saved_pct=100 * gzip_all["saved"] / total, gzip_all_s=gzip_all["seconds"],
                rollback_ok=bool(ok and rb and not rb["problems"]), tree_changed=before_tree != changed_tree,
+               cpu_read_hash=meta["phases"]["read_hash"], cpu_duplicates=meta["phases"]["duplicates"],
+               cpu_score=meta["phases"]["score_decide"], cpu_apply=manifest["measured"]["cpu_seconds"], cpu_rollback=rollback_cpu,
+               stages_wall_s=scan_s + manifest["measured"]["wall_seconds"] + rollback_s,
                cpu_s=cpu, energy_kwh_estimated=cpu * g.ASSUME["cpu_watts"] / 3.6e6, energy_kwh_measured=measured_kwh,
                near_potential_pct=100 * sum(f.size for f in files if f.action == "near") / total if total else 0,
                model_energy_saved_kwh_month=summ["before"]["kwh"] - summ["after"]["kwh"])
@@ -260,11 +265,174 @@ def run_once(root, labels, seed, n):
 
 
 # ----------------------------------------------------------------------------- reporting
-def ms(rows, key, d=3):
+STAGES = [("cpu_read_hash", "Reading files, hashing, sensitive-data check", "#2f9e6d"),
+          ("cpu_duplicates", "Finding duplicates", "#3b78b8"),
+          ("cpu_score", "Scoring and choosing actions", "#d9902b"),
+          ("cpu_apply", "Applying changes (compress or move, verify)", "#8a6bb8"),
+          ("cpu_rollback", "Rollback (restore and verify)", "#c4473d")]
+
+
+def mean(rows, key):
     v = [r[key] for r in rows if r.get(key) is not None]
-    if not v:
-        return "n/a"
-    return f"{statistics.mean(v):.{d}f} ± {statistics.pstdev(v):.{d}f}" if len(v) > 1 else f"{v[0]:.{d}f}"
+    return statistics.mean(v) if v else None
+
+
+def pct(x, d=0):
+    return "n/a" if x is None else f"{x * 100:.{d}f}%"
+
+
+def cpu_parts(rows):
+    """Share of CPU time per stage, averaged over the given runs."""
+    parts = [(label, mean(rows, key) or 0.0, color) for key, label, color in STAGES]
+    return parts
+
+
+def cpu_utilisation(rows):
+    """CPU time divided by elapsed time, in percent of one core, and of the whole machine."""
+    cpu = sum(sum(r[k] for k, _, _ in STAGES) for r in rows)
+    wall = sum(r["stages_wall_s"] for r in rows)
+    one = 100 * cpu / wall if wall else 0
+    return one, one / (os.cpu_count() or 1)
+
+
+def pie_svg(parts, title="Where the CPU time went"):
+    total = sum(v for _, v, _ in parts) or 1.0
+    cx, cy, r = 130, 135, 105
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 270" width="640" height="270" role="img" aria-label="{title}" font-family="Segoe UI, Arial, sans-serif">',
+           f'<text x="10" y="20" font-size="15" font-weight="700" fill="#14231c">{title}</text>']
+    ang = -math.pi / 2
+    live = [(l, v, c) for l, v, c in parts if v > 0]
+    for label, v, color in live:
+        frac = v / total
+        if len(live) == 1:
+            out.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}"/>')
+            break
+        a2 = ang + 2 * math.pi * frac
+        x1, y1, x2, y2 = cx + r * math.cos(ang), cy + r * math.sin(ang), cx + r * math.cos(a2), cy + r * math.sin(a2)
+        out.append(f'<path d="M{cx},{cy} L{x1:.2f},{y1:.2f} A{r},{r} 0 {1 if frac > .5 else 0} 1 {x2:.2f},{y2:.2f} Z" fill="{color}" stroke="#fff" stroke-width="2"/>')
+        ang = a2
+    y = 62
+    for label, v, color in parts:
+        out.append(f'<rect x="270" y="{y - 11}" width="14" height="14" rx="3" fill="{color}"/>'
+                   f'<text x="292" y="{y}" font-size="13" fill="#14231c">{label}</text>'
+                   f'<text x="292" y="{y + 16}" font-size="12" fill="#5a6d63">{100 * v / total:.1f}% of CPU time ({v:.2f} s)</text>')
+        y += 42
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def table(headers, body):
+    md = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)] + ["| " + " | ".join(str(c) for c in r) + " |" for r in body]
+    html = "<table><thead><tr>" + "".join(f"<th>{h}</th>" for h in headers) + "</tr></thead><tbody>" + \
+           "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in body) + "</tbody></table>"
+    return "\n".join(md), html
+
+
+def build_report(rows, args, env):
+    sizes = sorted({r["n_files"] for r in rows})
+    big = [r for r in rows if r["n_files"] == sizes[-1]]
+    n_runs = len(rows) // len(sizes)
+    labelled = "exact_precision" in rows[0]
+    mb = lambda rs: statistics.mean(r["total_bytes"] for r in rs) / 1e6
+    one, whole = cpu_utilisation(rows)
+    parts = cpu_parts(big)
+    tot = sum(v for _, v, _ in parts) or 1
+    top = max(parts, key=lambda p: p[1])
+    md, html = [], []
+
+    def para(text):
+        md.append(text + "\n")
+        html.append("<p>" + re.sub(r"`([^`]+)`", r"<code>\1</code>", text.replace("**", "")) + "</p>")
+
+    def head(text, level=2):
+        md.append("#" * level + " " + text + "\n")
+        html.append(f"<h{level}>{text}</h{level}>")
+
+    def bullets(items):
+        md.append("\n".join("- " + i for i in items) + "\n")
+        html.append("<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>")
+
+    def tbl(h, body):
+        m, hh = table(h, body)
+        md.append(m + "\n")
+        html.append(hh)
+
+    head("GreenData AI: results summary", 1)
+    para(f"Tested on {len(sizes)} folder sizes ({sizes[0]} to {sizes[-1]} files, {mb([r for r in rows if r['n_files'] == sizes[0]]):.1f} to {mb(big):.0f} MB), "
+         f"{n_runs} run(s) each. " + ("The folders are generated with known right answers, so every result can be checked." if labelled else "The folder is a real dataset, so there is no answer key."))
+    head("The short version" + (f" ({sizes[-1]} files)" if labelled else ""))
+    items = [f"**Storage saved:** {mean(big, 'saved_pct'):.0f}% (simple duplicate removal alone: {mean(big, 'hash_only_saved_pct'):.0f}%, compressing everything: {mean(big, 'gzip_all_saved_pct'):.0f}%)."]
+    if labelled:
+        items += [f"**Protected files changed:** {mean(big, 'unsafe_changes'):.0f} of {mean(big, 'must_keep_total'):.0f}. Compressing everything changes all {mean(big, 'must_keep_total'):.0f}.",
+                  f"**Exact copies found:** {pct(mean(rows, 'exact_recall'))}. **Near-copies found:** {pct(mean(rows, 'near_recall'))}.",
+                  f"**Sensitive files found:** {pct(mean(rows, 'pii_recall'))}, but only {pct(mean(rows, 'pii_precision'))} of the files it flagged were really sensitive (order numbers look like phone numbers)."]
+    items += [f"**Undo (rollback):** restored every file exactly in {sum(r['rollback_ok'] for r in rows)} of {len(rows)} runs.",
+              f"**Speed:** {mean(big, 'scan_s'):.0f} s to scan {sizes[-1]} files.",
+              f"**CPU:** busy {one:.0f}% of one core while working (about {whole:.0f}% of this {os.cpu_count()}-CPU machine). Biggest share: {top[0].lower()} ({100 * top[1] / tot:.0f}%)."]
+    bullets(items)
+    head("Results by folder size")
+    tbl(["Files", "Data size", "Storage saved", "Scan time", "CPU time", "Undo worked"],
+        [[n, f"{mb([r for r in rows if r['n_files'] == n]):.1f} MB", f"{mean([r for r in rows if r['n_files'] == n], 'saved_pct'):.0f}%",
+          f"{mean([r for r in rows if r['n_files'] == n], 'scan_s'):.1f} s", f"{mean([r for r in rows if r['n_files'] == n], 'cpu_s'):.1f} s",
+          f"{sum(r['rollback_ok'] for r in rows if r['n_files'] == n)} of {len([r for r in rows if r['n_files'] == n])}"] for n in sizes])
+    if labelled:
+        head("How well it finds things")
+        tbl(["What", "Found (share of the real ones)", "Correct (share of the flagged ones)"],
+            [["Exact copies", pct(mean(rows, "exact_recall")), pct(mean(rows, "exact_precision"))],
+             ["Near-copies (a few words changed)", pct(mean(rows, "near_recall")), pct(mean(rows, "near_precision"))],
+             ["Sensitive files", pct(mean(rows, "pii_recall")), pct(mean(rows, "pii_precision"))]])
+    head("Compared with simpler methods" + (f" ({sizes[-1]} files)" if labelled else ""))
+    tbl(["Method", "Storage saved", "Protected files changed", "Time"],
+        [["GreenData AI", f"{mean(big, 'saved_pct'):.0f}%", f"{mean(big, 'unsafe_changes'):.0f}" if labelled else "n/a", f"{mean(big, 'scan_s') + mean(big, 'apply_s'):.1f} s"],
+         ["Remove exact copies only", f"{mean(big, 'hash_only_saved_pct'):.0f}%", "not checked", f"{mean(big, 'hash_only_s'):.2f} s"],
+         ["Compress every file", f"{mean(big, 'gzip_all_saved_pct'):.0f}%", f"{mean(big, 'must_keep_total'):.0f} (all of them)" if labelled else "all of them", f"{mean(big, 'gzip_all_s'):.2f} s"]])
+    head("CPU usage")
+    para(f"CPU utilisation is CPU time divided by elapsed time. The tool runs on one core, so about 100% of one core means it was working the whole time. "
+         f"Measured: {one:.0f}% of one core, about {whole:.0f}% of the whole machine ({os.cpu_count()} CPUs). The chart shows where the CPU time went for the largest folder.")
+    md.append("![Where the CPU time went](cpu_pie.svg)\n")
+    html.append(pie_svg(parts))
+    bullets([f"{label}: {100 * v / tot:.0f}% ({v:.1f} s)" for label, v, _ in parts])
+    head("Read this first")
+    bullets([("The data is synthetic (generated by us). " if labelled else "") + "Numbers depend on this machine: " + f"Python {env['python']}, {env['cpu_count']} CPU(s).",
+             "Energy is estimated from CPU time (15 W per busy core)." if not env["codecarbon"] else "Energy was measured with CodeCarbon.",
+             "The dashboard's energy, CO2 and cost figures are assumptions, not results.",
+             "Full tables with every column: `results_detailed.md`. Raw numbers for every run: `results.csv`."])
+    return "\n".join(md), "\n".join(html), parts
+
+
+CSS = ("body{font:15px/1.55 Segoe UI,Arial,sans-serif;max-width:860px;margin:30px auto;padding:0 18px;color:#14231c}"
+       "h1{font-size:26px}h2{font-size:19px;margin-top:28px}table{border-collapse:collapse;width:100%;margin:8px 0}"
+       "th,td{border-bottom:1px solid #dde6e0;padding:7px 8px;text-align:left}th{color:#5a6d63;font-weight:600}"
+       "code{background:#eef4f0;padding:1px 5px;border-radius:4px}svg{max-width:100%;height:auto}")
+
+
+def detailed_md(rows, args, env):
+    sizes = sorted({r["n_files"] for r in rows})
+    ms = lambda rs, key, d=3: ("n/a" if not [r[key] for r in rs if r.get(key) is not None] else
+                               (f"{statistics.mean(r[key] for r in rs):.{d}f} ± {statistics.pstdev([r[key] for r in rs]):.{d}f}" if len(rs) > 1 else f"{rs[0][key]:.{d}f}"))
+    md = ["# Detailed tables", "", "Mean ± standard deviation over the runs. P = precision (flagged files that were right), R = recall (real ones that were found).",
+          f"Environment: Python {env['python']}, {env['os']}, {env['cpu_count']} CPUs, codec {env['codec']}, "
+          f"CodeCarbon {'installed' if env['codecarbon'] else 'not installed (energy is a CPU-time estimate)'}, {env['date']}.", ""]
+    if "exact_precision" in rows[0]:
+        md += ["## Detection quality", "", "| Files | Exact dup. P | R | Near dup. P | R | Sensitive P | R | Look-alike numbers flagged |", "|---|---|---|---|---|---|---|---|"]
+        for n in sizes:
+            s = [r for r in rows if r["n_files"] == n]
+            md.append(f"| {n} | {ms(s, 'exact_precision')} | {ms(s, 'exact_recall')} | {ms(s, 'near_precision')} | {ms(s, 'near_recall')} | {ms(s, 'pii_precision')} | {ms(s, 'pii_recall')} | {ms(s, 'decoys_flagged', 1)} of {s[0]['decoys_total']} |")
+        md += ["", "## Safety", "", "| Files | Protected files | GreenData changed | Compress-everything changed | Different files merged | Stale files archived | Incompressible files wasted |", "|---|---|---|---|---|---|---|"]
+        for n in sizes:
+            s = [r for r in rows if r["n_files"] == n]
+            md.append(f"| {n} | {ms(s, 'must_keep_total', 1)} | {ms(s, 'unsafe_changes', 1)} | {ms(s, 'gzip_all_unsafe_changes', 1)} | {ms(s, 'near_false_on_different', 1)} | {ms(s, 'stale_actioned', 1)} of {s[0]['stale_total']} | {ms(s, 'binary_wasted', 1)} |")
+    md += ["", "## Storage and time", "", "| Files | MB | GreenData saved % | Exact-copies-only saved % | Compress-all saved % | Scan s | Apply s | Exact-copies-only s | Compress-all s |", "|---|---|---|---|---|---|---|---|---|"]
+    for n in sizes:
+        s = [r for r in rows if r["n_files"] == n]
+        md.append(f"| {n} | {statistics.mean(r['total_bytes'] for r in s) / 1e6:.1f} | {ms(s, 'saved_pct', 1)} | {ms(s, 'hash_only_saved_pct', 1)} | {ms(s, 'gzip_all_saved_pct', 1)} | {ms(s, 'scan_s', 2)} | {ms(s, 'apply_s', 2)} | {ms(s, 'hash_only_s', 2)} | {ms(s, 'gzip_all_s', 2)} |")
+    md += ["", "## CPU time per stage (seconds) and energy", "", "| Files | Read+hash | Duplicates | Scoring | Apply | Rollback | Energy kWh (estimated from CPU time) | Energy kWh (CodeCarbon) | Rollback restored every byte |", "|---|---|---|---|---|---|---|---|---|"]
+    for n in sizes:
+        s = [r for r in rows if r["n_files"] == n]
+        md.append(f"| {n} | {ms(s, 'cpu_read_hash', 2)} | {ms(s, 'cpu_duplicates', 2)} | {ms(s, 'cpu_score', 2)} | {ms(s, 'cpu_apply', 2)} | {ms(s, 'cpu_rollback', 2)} | {ms(s, 'energy_kwh_estimated', 6)} | {ms(s, 'energy_kwh_measured', 6)} | {sum(r['rollback_ok'] for r in s)} of {len(s)} |")
+    md += ["", "Notes: the two baselines are our own simple implementations, not third-party tools. Energy from CPU time assumes 15 W per busy core. "
+           "`model_energy_saved_kwh_month` in results.csv is an assumption-based figure and must not be reported as measured.", ""]
+    return "\n".join(md)
 
 
 def write_outputs(out, rows, args):
@@ -273,44 +441,21 @@ def write_outputs(out, rows, args):
                cpu_count=os.cpu_count(), codec=g.CODEC_EXT, codecarbon=bool(g.EmissionsTracker), date=time.strftime("%Y-%m-%d %H:%M"))
     with open(os.path.join(out, "results.json"), "w") as fh:
         json.dump(dict(environment=env, args=vars(args), runs=rows), fh, indent=2)
-    keys = sorted({k for r in rows for k in r})
     with open(os.path.join(out, "results.csv"), "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=keys)
+        w = csv.DictWriter(fh, fieldnames=sorted({k for r in rows for k in r}))
         w.writeheader()
         w.writerows(rows)
+    md, html, parts = build_report(rows, args, env)
     sizes = sorted({r["n_files"] for r in rows})
-    md = ["# Measured results", "", f"Environment: Python {env['python']}, {env['os']}, {env['cpu_count']} CPUs, codec {env['codec']}, "
-          f"CodeCarbon {'installed' if env['codecarbon'] else 'not installed (energy is a CPU-time estimate)'}, {env['date']}.",
-          f"Each cell is mean ± standard deviation over {args.runs if hasattr(args, 'runs') else 1} run(s) with different random seeds.", ""]
-    has_labels = "exact_precision" in rows[0]
-    if has_labels:
-        md += ["## Table 1. Detection quality (against ground truth)", "", "| Files | Exact dup. P | R | Near dup. P | R | Sensitive P | R | Decoys flagged |", "|---|---|---|---|---|---|---|---|"]
-        for n in sizes:
-            s = [r for r in rows if r["n_files"] == n]
-            md.append(f"| {n} | {ms(s, 'exact_precision')} | {ms(s, 'exact_recall')} | {ms(s, 'near_precision')} | {ms(s, 'near_recall')} | "
-                      f"{ms(s, 'pii_precision')} | {ms(s, 'pii_recall')} | {ms(s, 'decoys_flagged', 1)} of {s[0]['decoys_total']} |")
-        md += ["", "## Table 2. Safety", "", "| Files | Protected files (sensitive + important) | GreenData changed | Compress-everything baseline changed | Different files merged as near-dup. | Stale files archived | Incompressible files wasted |", "|---|---|---|---|---|---|---|"]
-        for n in sizes:
-            s = [r for r in rows if r["n_files"] == n]
-            md.append(f"| {n} | {ms(s, 'must_keep_total', 1)} | {ms(s, 'unsafe_changes', 1)} | {ms(s, 'gzip_all_unsafe_changes', 1)} | {ms(s, 'near_false_on_different', 1)} | "
-                      f"{ms(s, 'stale_actioned', 1)} of {s[0]['stale_total']} | {ms(s, 'binary_wasted', 1)} |")
-    md += ["", "## Table 3. Storage saved and time", "", "| Files | Size (MB) | GreenData saved % | Hash-only dedup saved % | Compress-all saved % | GreenData scan s | apply s | Hash-only s | Compress-all s |", "|---|---|---|---|---|---|---|---|---|"]
-    for n in sizes:
-        s = [r for r in rows if r["n_files"] == n]
-        mb = statistics.mean(r["total_bytes"] for r in s) / 1e6
-        md.append(f"| {n} | {mb:.1f} | {ms(s, 'saved_pct', 1)} | {ms(s, 'hash_only_saved_pct', 1)} | {ms(s, 'gzip_all_saved_pct', 1)} | "
-                  f"{ms(s, 'scan_s', 2)} | {ms(s, 'apply_s', 2)} | {ms(s, 'hash_only_s', 2)} | {ms(s, 'gzip_all_s', 2)} |")
-    md += ["", "## Table 4. Energy of running the tool, and rollback", "", "| Files | CPU s | Energy (kWh) estimated from CPU time | Energy (kWh) measured by CodeCarbon | Rollback restored every byte |", "|---|---|---|---|---|"]
-    for n in sizes:
-        s = [r for r in rows if r["n_files"] == n]
-        md.append(f"| {n} | {ms(s, 'cpu_s', 2)} | {ms(s, 'energy_kwh_estimated', 6)} | {ms(s, 'energy_kwh_measured', 6)} | {sum(r['rollback_ok'] for r in s)} of {len(s)} |")
-    md += ["", "Notes: hash-only dedup and compress-all are our own simple baselines, not third-party tools. "
-           "The 'Compress-everything baseline' changes every file, so it touches every protected file by construction. "
-           "Energy from CPU time assumes 15 W per busy core and is an estimate. The tool's modelled monthly energy saving "
-           "(an assumption-based figure) is stored in results.csv as model_energy_saved_kwh_month and must not be reported as measured.", ""]
-    with open(os.path.join(out, "results.md"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(md))
-    return "\n".join(md)
+    with open(os.path.join(out, "cpu_pie.svg"), "w", encoding="utf-8") as fh:
+        fh.write(pie_svg(cpu_parts([r for r in rows if r["n_files"] == sizes[-1]])))
+    with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as fh:
+        fh.write(md)
+    with open(os.path.join(out, "report.html"), "w", encoding="utf-8") as fh:
+        fh.write(f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GreenData AI results</title><style>{CSS}</style><body>{html}</body></html>')
+    with open(os.path.join(out, "results_detailed.md"), "w", encoding="utf-8") as fh:
+        fh.write(detailed_md(rows, args, env))
+    return md
 
 
 def audit_sample(out, files, k, seed=1):
@@ -337,7 +482,7 @@ def cmd_synthetic(a):
             print(f"  n={n} seed={seed}: saved {row['saved_pct']:.1f}%, exact F1 {row['exact_f1']:.2f}, near F1 {row['near_f1']:.2f}, "
                   f"sensitive F1 {row['pii_f1']:.2f}, unsafe changes {row['unsafe_changes']}, rollback ok {row['rollback_ok']}")
     print("\n" + write_outputs(a.out, rows, a))
-    print(f"\nFiles written to {a.out}/ (results.md, results.csv, results.json)")
+    print(f"\nFiles written to {a.out}/ (report.md, report.html, cpu_pie.svg, results_detailed.md, results.csv, results.json)")
 
 
 def cmd_real(a):
