@@ -1,3 +1,0 @@
-# Optional. The tool works without these.
-zstandard
-codecarbon
