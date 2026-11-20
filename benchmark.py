@@ -366,7 +366,7 @@ def build_report(rows, args, env):
     if labelled:
         items += [f"**Protected files changed:** {mean(big, 'unsafe_changes'):.0f} of {mean(big, 'must_keep_total'):.0f}. Compressing everything changes all {mean(big, 'must_keep_total'):.0f}.",
                   f"**Exact copies found:** {pct(mean(rows, 'exact_recall'))}. **Near-copies found:** {pct(mean(rows, 'near_recall'))}.",
-                  f"**Sensitive files found:** {pct(mean(rows, 'pii_recall'))}, but only {pct(mean(rows, 'pii_precision'))} of the files it flagged were really sensitive (order numbers look like phone numbers)."]
+                  f"**Sensitive files found:** {pct(mean(rows, 'pii_recall'))}. Of the files it flagged, {pct(mean(rows, 'pii_precision'))} were really sensitive (decoys are order and tracking numbers that look like phone or Aadhaar numbers; real data will have other look-alikes)."]
     items += [f"**Undo (rollback):** restored every file exactly in {sum(r['rollback_ok'] for r in rows)} of {len(rows)} runs.",
               f"**Speed:** {mean(big, 'scan_s'):.0f} s to scan {sizes[-1]} files.",
               f"**CPU:** busy {one:.0f}% of one core while working (about {whole:.0f}% of this {os.cpu_count()}-CPU machine). Biggest share: {top[0].lower()} ({100 * top[1] / tot:.0f}%)."]

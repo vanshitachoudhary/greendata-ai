@@ -1,0 +1,1 @@
+# GreenData AI needs no packages. This file exists so hosting platforms detect a Python project.

@@ -7,18 +7,18 @@ Tested on 3 folder sizes (100 to 2000 files, 0.6 to 12 MB), 3 run(s) each. The f
 - **Storage saved:** 22% (simple duplicate removal alone: 9%, compressing everything: 29%).
 - **Protected files changed:** 0 of 240. Compressing everything changes all 240.
 - **Exact copies found:** 100%. **Near-copies found:** 99%.
-- **Sensitive files found:** 100%, but only 61% of the files it flagged were really sensitive (order numbers look like phone numbers).
+- **Sensitive files found:** 100%. Of the files it flagged, 100% were really sensitive (decoys are order and tracking numbers that look like phone or Aadhaar numbers; real data will have other look-alikes).
 - **Undo (rollback):** restored every file exactly in 9 of 9 runs.
-- **Speed:** 15 s to scan 2000 files.
-- **CPU:** busy 99% of one core while working (about 99% of this 1-CPU machine). Biggest share: finding duplicates (67%).
+- **Speed:** 9 s to scan 2000 files.
+- **CPU:** busy 99% of one core while working (about 99% of this 1-CPU machine). Biggest share: finding duplicates (52%).
 
 ## Results by folder size
 
 | Files | Data size | Storage saved | Scan time | CPU time | Undo worked |
 |---|---|---|---|---|---|
-| 100 | 0.6 MB | 21% | 0.7 s | 0.8 s | 3 of 3 |
-| 500 | 3.0 MB | 22% | 3.6 s | 3.9 s | 3 of 3 |
-| 2000 | 12.3 MB | 22% | 14.7 s | 16.0 s | 3 of 3 |
+| 100 | 0.6 MB | 21% | 0.5 s | 0.5 s | 3 of 3 |
+| 500 | 3.0 MB | 22% | 2.2 s | 2.5 s | 3 of 3 |
+| 2000 | 12.3 MB | 22% | 9.1 s | 10.4 s | 3 of 3 |
 
 ## How well it finds things
 
@@ -26,15 +26,15 @@ Tested on 3 folder sizes (100 to 2000 files, 0.6 to 12 MB), 3 run(s) each. The f
 |---|---|---|
 | Exact copies | 100% | 100% |
 | Near-copies (a few words changed) | 99% | 98% |
-| Sensitive files | 100% | 61% |
+| Sensitive files | 100% | 100% |
 
 ## Compared with simpler methods (2000 files)
 
 | Method | Storage saved | Protected files changed | Time |
 |---|---|---|---|
-| GreenData AI | 22% | 0 | 16.2 s |
-| Remove exact copies only | 9% | not checked | 0.03 s |
-| Compress every file | 29% | 240 (all of them) | 0.30 s |
+| GreenData AI | 22% | 0 | 10.5 s |
+| Remove exact copies only | 9% | not checked | 0.02 s |
+| Compress every file | 29% | 240 (all of them) | 0.27 s |
 
 ## CPU usage
 
@@ -42,11 +42,11 @@ CPU utilisation is CPU time divided by elapsed time. The tool runs on one core, 
 
 ![Where the CPU time went](cpu_pie.svg)
 
-- Reading files, hashing, sensitive-data check: 12% (1.9 s)
-- Finding duplicates: 67% (10.9 s)
-- Scoring and choosing actions: 11% (1.7 s)
-- Applying changes (compress or move, verify): 9% (1.4 s)
-- Rollback (restore and verify): 2% (0.2 s)
+- Reading files, hashing, sensitive-data check: 19% (2.0 s)
+- Finding duplicates: 52% (5.6 s)
+- Scoring and choosing actions: 14% (1.5 s)
+- Applying changes (compress or move, verify): 13% (1.3 s)
+- Rollback (restore and verify): 2% (0.3 s)
 
 ## Read this first
 

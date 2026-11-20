@@ -1,0 +1,103 @@
+<!-- Injected by hosted_server.py only. The GitHub Pages copy of the dashboard does not include this. -->
+<script>
+(function () {
+  if (!window.GD_HOSTED) return;
+  var $ = function (id) { return document.getElementById(id); };
+  var say = function (m) { if (typeof toast === "function") toast(m); else alert(m); };
+
+  // Notice at the top of the page
+  var note = document.createElement("div");
+  note.setAttribute("role", "note");
+  note.style.cssText = "margin:0;padding:10px 16px;font:13px/1.45 system-ui,sans-serif;text-align:center;background:#fff6dd;color:#5b4300;border-bottom:1px solid #e6cf8f";
+  note.textContent = "Live server mode. Apply and Rollback really change files, but only inside a temporary sandbox on this server, never on your computer. " +
+    "Do not upload private data. Your sandbox is deleted automatically after about an hour.";
+  document.body.insertBefore(note, document.body.firstChild);
+
+  var box = $("livebox");
+  if (!box) return;
+  var title = box.querySelector("b");
+  var small = box.querySelector("small");
+  if (title) title.textContent = "Run on the live server (real Apply and Rollback)";
+  if (small) small.textContent = "Create a fresh demo folder, or upload a few small files (up to 60 files, 5 MB in total). A scan changes nothing. Apply really moves or compresses the files in your sandbox, and Roll back restores them.";
+
+  // The server never accepts typed paths in this mode, so hide the path box.
+  var lp = $("lp"), lgo = $("lgo");
+  var row = lp ? lp.parentNode : null;
+  if (lp) lp.style.display = "none";
+  if (lgo) lgo.style.display = "none";
+  if (!row) return;
+
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-GD-Token": window.GD_TOKEN || "" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok || j.error) throw new Error(j.error || ("Server error " + r.status));
+        return j;
+      });
+    });
+  }
+
+  function scanFolder(name) {
+    lp.value = name;
+    lgo.click();
+  }
+
+  var demoBtn = document.createElement("button");
+  demoBtn.type = "button";
+  demoBtn.textContent = "Create demo folder on server and scan";
+  demoBtn.onclick = function () {
+    demoBtn.disabled = true;
+    post("/api/demo", {}).then(function (r) { scanFolder(r.dir); })
+      .catch(function (e) { say(e.message); })
+      .then(function () { demoBtn.disabled = false; });
+  };
+
+  var pick = document.createElement("input");
+  pick.type = "file"; pick.multiple = true; pick.style.display = "none";
+  var pickDir = document.createElement("input");
+  pickDir.type = "file"; pickDir.multiple = true; pickDir.style.display = "none";
+  pickDir.setAttribute("webkitdirectory", ""); pickDir.setAttribute("directory", "");
+
+  function toB64(buf) {
+    var bytes = new Uint8Array(buf), s = "", step = 0x8000;
+    for (var i = 0; i < bytes.length; i += step) s += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+    return btoa(s);
+  }
+
+  function upload(list) {
+    var files = Array.prototype.slice.call(list || []);
+    if (!files.length) return;
+    if (files.length > 60) { say("Please pick at most 60 files."); return; }
+    var total = files.reduce(function (a, f) { return a + f.size; }, 0);
+    if (total > 5000000) { say("Those files are " + (total / 1e6).toFixed(1) + " MB. The demo server accepts 5 MB in total."); return; }
+    say("Uploading " + files.length + " file(s) to your sandbox ...");
+    Promise.all(files.map(function (f) {
+      return f.arrayBuffer().then(function (buf) {
+        var p = f.webkitRelativePath ? f.webkitRelativePath.split("/").slice(1).join("/") : "";
+        return { path: p || f.name, mtime: f.lastModified, b64: toB64(buf) };
+      });
+    })).then(function (items) { return post("/api/upload", { files: items }); })
+      .then(function (r) { scanFolder(r.dir); })
+      .catch(function (e) { say(e.message); });
+  }
+
+  pick.onchange = function () { upload(pick.files); pick.value = ""; };
+  pickDir.onchange = function () { upload(pickDir.files); pickDir.value = ""; };
+
+  var upBtn = document.createElement("button");
+  upBtn.type = "button"; upBtn.textContent = "Upload files to server and scan";
+  upBtn.onclick = function () { pick.click(); };
+  var upDirBtn = document.createElement("button");
+  upDirBtn.type = "button"; upDirBtn.textContent = "Upload a small folder";
+  upDirBtn.onclick = function () { pickDir.click(); };
+
+  row.appendChild(demoBtn);
+  row.appendChild(upBtn);
+  row.appendChild(upDirBtn);
+  row.appendChild(pick);
+  row.appendChild(pickDir);
+})();
+</script>

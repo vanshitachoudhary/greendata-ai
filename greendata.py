@@ -12,6 +12,7 @@ for compression, and if `codecarbon` is installed `--measure` records measured e
 """
 import argparse
 import bz2  # noqa: F401  (kept for completeness of stdlib codecs)
+import contextlib
 import hashlib
 import itertools
 import json
@@ -22,6 +23,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -50,6 +52,13 @@ PII_RE = {
     "aadhaar": re.compile(r"(?<!\d)[2-9]\d{3}\s?\d{4}\s?\d{4}(?!\d)"),
     "PAN": re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"),
 }
+# Context rules. A bare 10 or 12 digit number is only treated as personal data when the text around it says so.
+PHONE_FORMATTED = re.compile(r"(?<!\d)(?:\+91[\s-]?[6-9]\d{9}|(?:91|0)[\s-][6-9]\d{9}|[6-9]\d{4}[\s-]\d{5})(?!\d)")
+PHONE_WORDS = re.compile(r"\b(?:phone|mobile|mob|cell|contact|tel|telephone|whatsapp|call|ph)\b", re.I)
+AADHAAR_WORDS = re.compile(r"(?:aadhaar|aadhar|uidai|\buid\b|\bid\b|identity|\bkyc\b|आधार)", re.I)
+NOT_PERSONAL = {"order", "orders", "invoice", "inv", "tracking", "awb", "ref", "reference", "txn", "transaction", "sku",
+                "serial", "ticket", "bill", "po", "utr", "rrn", "batch", "lot", "account", "acct", "card", "isbn"}
+PAN_HOLDER = set("ABCFGHLJPT")  # 4th letter of a real PAN is the holder type
 ALREADY_COMPRESSED = {"zip", "gz", "xz", "zst", "bz2", "7z", "rar", "jpg", "jpeg", "png", "gif", "webp", "mp4", "mp3", "docx", "xlsx", "pptx"}
 
 
@@ -69,14 +78,50 @@ def verhoeff_ok(digits):
     return c == 0
 
 
+def _after_id_word(text, pos):
+    """True when one of the two words just before pos says the number is an order, invoice, tracking or similar ID."""
+    words = re.findall(r"[A-Za-z]+", text[max(0, pos - 40):pos])[-2:]
+    return any(w.lower() in NOT_PERSONAL for w in words)
+
+
+def _phone(text):
+    """Indian mobile numbers. Formatted numbers always count. A bare 10 digit number counts only with phone context:
+    a phone word just before it, a phone column in the header line, or a list of at least 5 different such numbers.
+    A number right after words like order, invoice or tracking never counts (those are IDs, not people)."""
+    if any(not _after_id_word(text, m.start()) for m in PHONE_FORMATTED.finditer(text)):
+        return True
+    header = PHONE_WORDS.search(text[:text.find("\n") if "\n" in text[:2000] else 200]) is not None
+    bare = set()
+    for m in PII_RE["phone"].finditer(text):
+        if _after_id_word(text, m.start()):
+            continue
+        if header or PHONE_WORDS.search(text[max(0, m.start() - 30):m.start()]):
+            return True
+        bare.add(m.group())
+    return len(bare) >= 5
+
+
+def _aadhaar(text):
+    """12 digit Aadhaar with a valid Verhoeff check digit. Written as 4-4-4 it counts. Written as 12 plain digits it needs an Aadhaar word nearby."""
+    for m in PII_RE["aadhaar"].finditer(text):
+        raw = m.group()
+        if _after_id_word(text, m.start()) or not verhoeff_ok(re.sub(r"\s", "", raw)):
+            continue
+        if re.search(r"\s", raw) or AADHAAR_WORDS.search(text[max(0, m.start() - 40):m.start()]):
+            return True
+    return False
+
+
 def has_pii(text):
     found = []
-    for k, rx in PII_RE.items():
-        if k == "aadhaar":
-            if any(verhoeff_ok(re.sub(r"\s", "", m.group())) for m in rx.finditer(text)):
-                found.append(k)
-        elif rx.search(text):
-            found.append(k)
+    if PII_RE["email"].search(text):
+        found.append("email")
+    if _phone(text):
+        found.append("phone")
+    if _aadhaar(text):
+        found.append("aadhaar")
+    if any(m.group()[3] in PAN_HOLDER for m in PII_RE["PAN"].finditer(text)):
+        found.append("PAN")
     return found
 
 
@@ -186,13 +231,16 @@ def _h64(s):
     return int.from_bytes(hashlib.blake2b(s.encode("utf-8", "ignore"), digest_size=8).digest(), "big")
 
 
-_P = (1 << 61) - 1
+_MASK = (1 << 64) - 1
 _RNG = random.Random(42)
-_PERMS = [(_RNG.randrange(1, _P), _RNG.randrange(0, _P)) for _ in range(64)]
+_PERMS = [(_RNG.getrandbits(64) | 1, _RNG.getrandbits(64)) for _ in range(64)]
+SIG_K = 1000  # sketch size: only the 1000 smallest shingle hashes feed the signature (bottom-k sampling, same for every file)
 
 
 def _signature(shingles):
-    return [min((a * h + b) % _P for h in shingles) for a, b in _PERMS]
+    """MinHash signature. Bottom-k sampling keeps it fast on big files; candidates are still confirmed with the exact Jaccard similarity."""
+    sample = sorted(shingles)[:SIG_K] if len(shingles) > SIG_K else shingles
+    return [min((a * h + b) & _MASK for h in sample) for a, b in _PERMS]
 
 
 def iter_files(root):
@@ -434,6 +482,8 @@ def _compress(src, dst):
 
 def _decompress(src, dst):
     if src.endswith(".zst"):
+        if not zstd:
+            raise RuntimeError("this file was compressed with zstd, run: pip install zstandard")
         with open(src, "rb") as i, open(dst, "wb") as o:
             zstd.ZstdDecompressor().copy_stream(i, o)
     else:
@@ -462,12 +512,55 @@ def _audit(root, line):
         fh.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
 
 
+_ROOT_LOCKS, _ROOT_LOCKS_GUARD = {}, threading.Lock()
+RESTORABLE_STATES = ("applied", "partially_rolled_back")
+
+
+@contextlib.contextmanager
+def _root_lock(root):
+    """One apply or rollback at a time per folder, so two clicks (or two visitors) cannot corrupt each other."""
+    with _ROOT_LOCKS_GUARD:
+        lock = _ROOT_LOCKS.setdefault(os.path.abspath(root), threading.Lock())
+    with lock:
+        yield
+
+
+def _new_run(base):
+    """Run ids sort by time. The random suffix keeps two runs in the same second apart."""
+    while True:
+        run = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
+        if not os.path.exists(os.path.join(base, "manifests", run + ".json")) and not os.path.exists(os.path.join(base, "trash", run)):
+            return run
+
+
+def _rel(root, p):
+    return os.path.relpath(p, root).replace(os.sep, "/")
+
+
+def _restore_meta(dst, rec):
+    """Put back the permissions and the times the file had before it was changed."""
+    try:
+        if "mtime_ns" in rec:
+            os.utime(dst, ns=(rec.get("atime_ns", rec["mtime_ns"]), rec["mtime_ns"]))
+        if "mode" in rec:
+            os.chmod(dst, rec["mode"])
+    except OSError:
+        pass
+
+
 def apply_plan(root, files, cfg, measure=False):
-    run = datetime.now().strftime("%Y%m%d-%H%M%S")
+    with _root_lock(root):
+        return _apply_locked(root, files, cfg, measure)
+
+
+def _apply_locked(root, files, cfg, measure):
     base = os.path.join(root, STATE_DIR)
-    trash, arch, mdir = (os.path.join(base, d, run) if d != "manifests" else os.path.join(base, d) for d in ("trash", "archive", "manifests"))
+    os.makedirs(base, exist_ok=True)
+    run = _new_run(base)
+    trash, arch, mdir = os.path.join(base, "trash", run), os.path.join(base, "archive", run), os.path.join(base, "manifests")
     for d in (trash, arch, mdir):
         os.makedirs(d, exist_ok=True)
+    jpath, tmpchk = os.path.join(mdir, run + ".journal"), os.path.join(base, "verify.tmp")
     tracker = None
     if measure and EmissionsTracker:
         try:
@@ -477,41 +570,67 @@ def apply_plan(root, files, cfg, measure=False):
             tracker = None
     t0, c0 = time.time(), time.process_time()
     done, saved, skipped = [], 0, []
-    for f in approved(files, cfg):
-        src = _inside(root, f.rel)
-        try:
-            if _sha(src) != f.sha:
-                skipped.append((f.rel, "file changed since the scan")); continue
-            if f.action in ("dedupe", "near"):
-                keep = _inside(root, f.of)
-                if not os.path.exists(keep) or (f.action == "dedupe" and _sha(keep) != f.sha):
-                    skipped.append((f.rel, "original not found or different")); continue
-                dst = os.path.join(trash, f.rel)
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.move(src, dst)
-                got = f.size
-                rec = dict(action=f.action, path=f.rel, stored=os.path.relpath(dst, root).replace(os.sep, "/"), sha256=f.sha, size=f.size, kept=f.of)
-            else:
-                dst = (os.path.join(arch, f.rel) if f.action == "archive" else src) + CODEC_EXT
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                _compress(src, dst)
-                chk = dst + ".verify"
-                _decompress(dst, chk)
-                ok = _sha(chk) == f.sha
-                os.remove(chk)
-                if not ok:
-                    os.remove(dst); skipped.append((f.rel, "verification failed")); continue
-                got = f.size - os.path.getsize(dst)
-                if got <= 0:
-                    os.remove(dst); skipped.append((f.rel, "no space saved")); continue
-                os.remove(src)
-                rec = dict(action=f.action, path=f.rel, stored=os.path.relpath(dst, root).replace(os.sep, "/"), sha256=f.sha, size=f.size, stored_size=os.path.getsize(dst))
-            saved += got
-            rec["saved"] = got
-            done.append(rec)
-            _audit(root, f"{run} {f.action} {f.rel} saved={got}")
-        except (OSError, ValueError) as e:
-            skipped.append((f.rel, str(e)))
+    # The journal is written BEFORE each change and flushed. If the program is killed half way, rollback can still find every file.
+    with open(jpath, "a", encoding="utf-8") as jr:
+        def jw(kind, **kw):
+            jr.write(json.dumps(dict(k=kind, **kw)) + "\n")
+            jr.flush()
+
+        for f in approved(files, cfg):
+            created, src = [], None
+            try:
+                src = _inside(root, f.rel)
+                if not os.path.isfile(src):
+                    skipped.append((f.rel, "file is no longer at this location (already applied, moved or deleted)")); continue
+                st = os.stat(src)  # before reading it, so the access time we record is the real one
+                if _sha(src) != f.sha:
+                    skipped.append((f.rel, "file changed since the scan")); continue
+                meta = dict(mode=st.st_mode & 0o7777, mtime_ns=st.st_mtime_ns, atime_ns=st.st_atime_ns)
+                if f.action in ("dedupe", "near"):
+                    keep = _inside(root, f.of)
+                    if not os.path.exists(keep) or (f.action == "dedupe" and _sha(keep) != f.sha):
+                        skipped.append((f.rel, "original not found or different")); continue
+                    dst = os.path.join(trash, f.rel)
+                    rec = dict(action=f.action, path=f.rel, stored=_rel(root, dst), sha256=f.sha, size=f.size, kept=f.of, **meta)
+                    jw("begin", **rec)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    created.append(dst)
+                    shutil.move(src, dst)
+                    got = f.size
+                else:
+                    dst = (os.path.join(arch, f.rel) if f.action == "archive" else src) + CODEC_EXT
+                    if os.path.lexists(dst):
+                        skipped.append((f.rel, f"a file named {os.path.basename(dst)} already exists here, left untouched")); continue
+                    rec = dict(action=f.action, path=f.rel, stored=_rel(root, dst), sha256=f.sha, size=f.size, **meta)
+                    jw("begin", **rec)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    created += [dst, tmpchk]
+                    _compress(src, dst)
+                    _decompress(dst, tmpchk)
+                    ok = _sha(tmpchk) == f.sha
+                    os.remove(tmpchk)
+                    if not ok:
+                        os.remove(dst); jw("undo", path=f.rel); skipped.append((f.rel, "verification failed")); continue
+                    rec["stored_size"] = os.path.getsize(dst)
+                    got = f.size - rec["stored_size"]
+                    if got <= 0:
+                        os.remove(dst); jw("undo", path=f.rel); skipped.append((f.rel, "no space saved")); continue
+                    os.remove(src)
+                saved += got
+                rec["saved"] = got
+                done.append(rec)
+                jw("done", path=f.rel, saved=got)
+                _audit(root, f"{run} {f.action} {f.rel} saved={got}")
+            except (OSError, ValueError, RuntimeError, lzma.LZMAError) as e:
+                if src and os.path.exists(src):  # the original is still in place, so remove anything half written
+                    for p in created:
+                        with contextlib.suppress(OSError):
+                            if os.path.isfile(p):
+                                os.remove(p)
+                jw("undo", path=f.rel)
+                skipped.append((f.rel, str(e)))
+    with contextlib.suppress(OSError):
+        os.remove(tmpchk)
     cpu, wall = time.process_time() - c0, time.time() - t0
     measured = dict(wall_seconds=wall, cpu_seconds=cpu, cpu_energy_kwh_estimated=cpu * ASSUME["cpu_watts"] / 3.6e6)
     if tracker:
@@ -521,49 +640,139 @@ def apply_plan(root, files, cfg, measure=False):
             measured["codecarbon_co2_kg"] = tracker.final_emissions_data.emissions
         except Exception:
             pass
+    # saved_bytes = how much leaves the working folder. Only compression really frees disk now.
+    # Exact and near copies are moved into .greendata/trash and stay on disk until that folder is deleted.
+    freed_now = sum(r["saved"] for r in done if r["action"] in ("archive", "compress"))
     manifest = dict(run=run, created=datetime.now().isoformat(timespec="seconds"), status="applied", actions=done,
-                    saved_bytes=saved, skipped=skipped, measured=measured)
-    with open(os.path.join(mdir, run + ".json"), "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, indent=2)
+                    saved_bytes=saved, freed_now_bytes=freed_now, in_trash_bytes=saved - freed_now, skipped=skipped, measured=measured)
+    _write_manifest(root, manifest)
+    with contextlib.suppress(OSError):
+        os.remove(jpath)
     return manifest
 
 
-def rollback(root, run=None):
+def _write_manifest(root, m):
+    path = os.path.join(root, STATE_DIR, "manifests", m["run"] + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(m, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def _load_runs(root):
+    """All runs that can still be rolled back, oldest first. A run that was cut short (a journal without a manifest) is rebuilt from its journal."""
     mdir = os.path.join(root, STATE_DIR, "manifests")
-    runs = sorted(x[:-5] for x in os.listdir(mdir)) if os.path.isdir(mdir) else []
-    cands = []
-    for r in runs:
-        with open(os.path.join(mdir, r + ".json"), encoding="utf-8") as fh:
-            m = json.load(fh)
-        if m["status"] == "applied" and (run is None or r == run):
-            cands.append(m)
-    if not cands:
-        return None
-    m = cands[-1]
-    restored, problems = 0, []
-    for rec in reversed(m["actions"]):
-        dst, stored = _inside(root, rec["path"]), _inside(root, rec["stored"])
-        try:
-            if rec["action"] in ("dedupe", "near"):
-                if os.path.exists(dst):
-                    problems.append((rec["path"], "target exists, left in trash")); continue
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.move(stored, dst)
-            else:
-                if os.path.exists(dst):
-                    problems.append((rec["path"], "target exists, kept archive")); continue
-                _decompress(stored, dst)
-                if _sha(dst) != rec["sha256"]:
-                    os.remove(dst); problems.append((rec["path"], "verification failed")); continue
-                os.remove(stored)
+    if not os.path.isdir(mdir):
+        return []
+    names = os.listdir(mdir)
+    runs = []
+    for n in sorted(names):
+        if n.endswith(".json"):
+            with open(os.path.join(mdir, n), encoding="utf-8") as fh:
+                runs.append(json.load(fh))
+        elif n.endswith(".journal") and n[:-8] + ".json" not in names:
+            begins, finished, undone = {}, {}, set()
+            with open(os.path.join(mdir, n), encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue  # a half written last line
+                    kind = d.pop("k", "")
+                    if kind == "begin":
+                        begins[d["path"]] = d
+                    elif kind == "done":
+                        finished[d["path"]] = d.get("saved", 0)
+                    elif kind == "undo":
+                        undone.add(d["path"])
+            acts = []
+            for p, rec in begins.items():
+                interrupted = p not in finished and p not in undone and os.path.exists(os.path.join(root, rec["stored"]))
+                if p in finished or interrupted:
+                    rec["saved"] = finished.get(p, 0)
+                    acts.append(rec)
+            if acts:
+                runs.append(dict(run=n[:-8], created="", status="applied", actions=acts, saved_bytes=sum(a["saved"] for a in acts),
+                                 skipped=[], recovered=True, measured={}))
+    return [m for m in runs if m.get("status") in RESTORABLE_STATES]
+
+
+def _restore_one(root, rec):
+    """Bring one file back. It looks at what is really on disk, so it is safe to run again after an interruption. Returns None or a problem text."""
+    dst, stored = _inside(root, rec["path"]), _inside(root, rec["stored"])
+    has_dst, has_stored = os.path.lexists(dst), os.path.exists(stored)
+    if rec["action"] in ("dedupe", "near"):
+        if has_stored and has_dst:
+            return "target exists, left in trash"
+        if has_stored:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(stored, dst)
+        elif not has_dst:
+            return "the stored copy is missing"
+        if _sha(dst) != rec["sha256"]:
+            return "restored file does not match the recorded hash"
+    else:
+        if has_stored and has_dst:
+            if _sha(dst) != rec["sha256"]:
+                return "target exists, kept archive"
+            os.remove(stored)  # the original is intact (an interrupted apply), drop our extra copy
+        elif has_stored:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            tmp = dst + ".gd-restoring"
+            try:
+                _decompress(stored, tmp)
+                if _sha(tmp) != rec["sha256"]:
+                    return "verification failed"
+                os.replace(tmp, dst)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+            os.remove(stored)
+        elif not has_dst:
+            return "the archived copy is missing"
+    _restore_meta(dst, rec)
+    return None
+
+
+def _prune_empty(path, stop):
+    """Remove empty folders left behind in .greendata after a rollback."""
+    for d, _, _ in sorted(os.walk(path), key=lambda x: -len(x[0])):
+        with contextlib.suppress(OSError):
+            os.rmdir(d)
+    with contextlib.suppress(OSError):
+        os.rmdir(stop)
+
+
+def rollback(root, run=None):
+    with _root_lock(root):
+        cands = [m for m in _load_runs(root) if run is None or m["run"] == run]
+        if not cands:
+            return None
+        m = cands[-1]
+        restored, problems = 0, []
+        for rec in reversed(m["actions"]):
+            if rec.get("restored"):
+                continue
+            try:
+                why = _restore_one(root, rec)
+            except (OSError, ValueError, RuntimeError, lzma.LZMAError) as e:
+                why = str(e)
+            if why:
+                problems.append((rec["path"], why))
+                continue
+            rec["restored"] = True
             restored += 1
             _audit(root, f"{m['run']} rollback {rec['path']}")
-        except OSError as e:
-            problems.append((rec["path"], str(e)))
-    m["status"] = "rolled_back" if not problems else "partially_rolled_back"
-    with open(os.path.join(mdir, m["run"] + ".json"), "w", encoding="utf-8") as fh:
-        json.dump(m, fh, indent=2)
-    return dict(run=m["run"], restored=restored, problems=problems)
+        m["status"] = "rolled_back" if not problems else "partially_rolled_back"
+        _write_manifest(root, m)
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(root, STATE_DIR, "manifests", m["run"] + ".journal"))
+        if not problems:
+            for sub in ("trash", "archive"):
+                p = os.path.join(root, STATE_DIR, sub, m["run"])
+                if os.path.isdir(p):
+                    _prune_empty(p, p)
+        return dict(run=m["run"], restored=restored, problems=problems)
 
 
 # ----------------------------------------------------------------------------- demo data
@@ -855,7 +1064,9 @@ def main(argv=None):
     if not a.yes and input(f"\nApply {n} actions? Files are moved or compressed, never deleted. [y/N] ").lower() != "y":
         print("Cancelled."); return 0
     m = apply_plan(a.dir, files, cfg, measure=a.measure)
-    print(f"\nApplied {len(m['actions'])} actions, actually freed {fmt_bytes(m['saved_bytes'])} (run {m['run']}).")
+    print(f"\nApplied {len(m['actions'])} actions (run {m['run']}). Freed on disk now: {fmt_bytes(m['freed_now_bytes'])}.")
+    if m["in_trash_bytes"]:
+        print(f"Copies moved to {STATE_DIR}/trash: {fmt_bytes(m['in_trash_bytes'])}. They stay on disk until you delete that folder (after that, rollback cannot bring them back).")
     for rel, why in m["skipped"]:
         print(f"  skipped {rel}: {why}")
     ms = m["measured"]

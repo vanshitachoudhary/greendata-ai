@@ -405,7 +405,7 @@ function render(){
  $("net").textContent="Net of the scan itself ("+fE(over)+"), month one saves "+fE(Math.max(net,0))+" and "+fC(Math.max(net,0)*REG[reg.value])+" of CO₂.";
  {const ft=$("foot");if(!ft.dataset.o)ft.dataset.o=ft.textContent;ft.textContent=LIVE?ft.dataset.o.replace("Prototype.","Live mode: moves and compression run on your disk, are verified by SHA-256 and can be rolled back.").replace("and compression is estimated, not performed.","and energy, CO₂ and cost remain estimates."):ft.dataset.o}
  if(SCALE!=1)$("net").textContent+=" What-if: the energy, time and cost model treats this folder as "+SCALE.toLocaleString("en-IN")+"x larger than its real "+fB(TOT)+".";
- if(LIVE&&LIVE.real!=null)$("net").textContent+=" Measured on disk: "+fB(LIVE.real/1e9)+" actually freed.";
+ if(LIVE&&LIVE.real!=null)$("net").textContent+=" Measured on disk: "+fB(LIVE.real/1e9)+" freed now"+(LIVE.trash>0?", plus "+fB(LIVE.trash/1e9)+" of copies moved to .greendata/trash (freed when you delete that folder).":".");
  $("b0").textContent=fB(TOT);$("b1").textContent=fB(TOT-saved);
  $("barB").innerHTML=P.map(p=>`<i title="${p.n}" style="width:${p.gb/TOT*100}%;background:${COL[p.a]}"></i>`).join("");
  $("barA").innerHTML=P.map(p=>{const r=p.gb*(on(p)?1-p.fr:1);return`<i title="${p.n}" style="width:${r/TOT*100}%;background:${COL[p.a]}"></i>`}).join("");
@@ -457,7 +457,15 @@ $("cpuref").onclick=()=>api("/api/cpu",{}).then(r=>{SYS=r;render()}).catch(e=>to
 
 const VD=[[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],[3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],[6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],[9,8,7,6,5,4,3,2,1,0]],VP=[[0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],[8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],[2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]];
 function verhoeff(s){let c=0;[...s].reverse().forEach((ch,i)=>{c=VD[c][VP[i%8][+ch]]});return c==0}
-function hasPII(t){if(!t)return false;if(PII[0].test(t)||PII[1].test(t)||PII[3].test(t))return true;return(t.match(/(?<!\d)[2-9]\d{3}\s?\d{4}\s?\d{4}(?!\d)/g)||[]).some(x=>verhoeff(x.replace(/\s/g,"")))}
+const NOTP=new Set(["order","orders","invoice","inv","tracking","awb","ref","reference","txn","transaction","sku","serial","ticket","bill","po","utr","rrn","batch","lot","account","acct","card","isbn"]);
+const PHONE_W=/\b(?:phone|mobile|mob|cell|contact|tel|telephone|whatsapp|call|ph)\b/i,AADH_W=/(?:aadhaar|aadhar|uidai|\buid\b|\bid\b|identity|\bkyc\b|आधार)/i;
+function afterIdWord(t,p){return(t.slice(Math.max(0,p-40),p).match(/[A-Za-z]+/g)||[]).slice(-2).some(w=>NOTP.has(w.toLowerCase()))}
+function phoneOK(t){for(const m of t.matchAll(/(?<!\d)(?:\+91[\s-]?[6-9]\d{9}|(?:91|0)[\s-][6-9]\d{9}|[6-9]\d{4}[\s-]\d{5})(?!\d)/g))if(!afterIdWord(t,m.index))return true;
+ const nl=t.indexOf("\n"),hd=PHONE_W.test(t.slice(0,(nl>=0&&nl<2000)?nl:200)),bare=new Set();
+ for(const m of t.matchAll(/(?<!\d)[6-9]\d{9}(?!\d)/g)){if(afterIdWord(t,m.index))continue;if(hd||PHONE_W.test(t.slice(Math.max(0,m.index-30),m.index)))return true;bare.add(m[0])}
+ return bare.size>=5}
+function aadhaarOK(t){for(const m of t.matchAll(/(?<!\d)[2-9]\d{3}\s?\d{4}\s?\d{4}(?!\d)/g)){const r=m[0];if(afterIdWord(t,m.index)||!verhoeff(r.replace(/\s/g,"")))continue;if(/\s/.test(r)||AADH_W.test(t.slice(Math.max(0,m.index-40),m.index)))return true}return false}
+function hasPII(t){if(!t)return false;return PII[0].test(t)||phoneOK(t)||aadhaarOK(t)||[...t.matchAll(/\b[A-Z]{5}\d{4}[A-Z]\b/g)].some(m=>"ABCFGHLJPT".includes(m[0][3]))}
 const TX=["txt","csv","log","json","md","html","xml","tsv","py","js"];
 const TYPE=e=>({csv:"csv",tsv:"csv",log:"log",json:"json",pdf:"pdf",jpg:"img",jpeg:"img",png:"img",gif:"img",webp:"img",doc:"doc",docx:"doc"}[e]||(TX.includes(e)?"txt":"bin"));
 const PII=[/[\w.+-]+@[\w-]+\.[\w.]+/,/\b[6-9]\d{9}\b/,/\b\d{4}\s?\d{4}\s?\d{4}\b/,/\b[A-Z]{5}\d{4}[A-Z]\b/];
@@ -516,16 +524,16 @@ async function liveApply(){
  try{const m=await api("/api/apply",{session:LIVE.session,approved:ap,threshold:+$("th").value,weights:W});
   const bad=new Set(m.skipped.map(x=>x[0])),got={};m.actions.forEach(a=>got[a.path]=a.saved);
   Object.keys(LIVE.rows).forEach(n=>{const r=LIVE.rows[n];if(n in got)r.saved_bytes=got[n];else if(ap.includes(n)){r.saved_bytes=0;r.action="keep";r.reason="Skipped: "+(m.skipped.find(x=>x[0]==n)||[0,"not applied"])[1]}});
-  LIVE.real=m.saved_bytes;LIVE.run=m.run;LIVE.apply=m.measured;applied=true;
-  logAdd("Applied "+m.actions.length+" actions on disk, actually freed "+fB(m.saved_bytes/1e9)+" (run "+m.run+"). Measured "+m.measured.wall_seconds.toFixed(2)+" s, "+m.measured.cpu_seconds.toFixed(2)+" s CPU.");
+  LIVE.real=(m.freed_now_bytes!=null?m.freed_now_bytes:m.saved_bytes);LIVE.trash=m.in_trash_bytes||0;LIVE.run=m.run;LIVE.apply=m.measured;applied=true;
+  logAdd("Applied "+m.actions.length+" actions on disk. Freed on disk now: "+fB(LIVE.real/1e9)+(LIVE.trash>0?"; copies moved to .greendata/trash: "+fB(LIVE.trash/1e9)+" (they stay on disk until you delete that folder)":"")+" (run "+m.run+"). Measured "+m.measured.wall_seconds.toFixed(2)+" s, "+m.measured.cpu_seconds.toFixed(2)+" s CPU.");
   m.skipped.forEach(x=>logAdd("Skipped "+x[0]+": "+x[1]));
-  render();toast("Applied. Freed "+fB(m.saved_bytes/1e9)+" on disk.");burst();
+  render();toast("Applied. Freed "+fB(LIVE.real/1e9)+" on disk"+(LIVE.trash>0?", "+fB(LIVE.trash/1e9)+" moved to trash.":"."));burst();
  }catch(e){toast(e.message)}
  $("apply").disabled=applied}
 async function liveUndo(){
  try{const r=await api("/api/rollback",{dir:LIVE.dir,run:LIVE.run});
   const q=await api("/api/replan",{session:LIVE.session,threshold:+$("th").value,weights:W});LIVE.rows={};q.files.forEach(x=>LIVE.rows[x.n]=x);LIVE.k=+$("th").value+"|"+W;LIVE.real=null;LIVE.apply=null;applied=false;
-  logAdd("Rolled back run "+r.run+": restored "+r.restored+" items, verified by SHA-256."+(r.problems.length?" Problems: "+r.problems.map(p=>p[0]).join(", "):""));
+  logAdd("Rolled back run "+r.run+": restored "+r.restored+" items, verified by SHA-256."+(r.problems.length?" Problems: "+r.problems.map(p=>p[0]+" ("+p[1]+")").join("; "):""));
   render();toast("Rolled back. Folder restored.");
  }catch(e){toast(e.message)}}
 $("lgo").onclick=liveScan;$("lp").onkeydown=e=>{if(e.key=="Enter")liveScan()};
@@ -565,7 +573,7 @@ function startTour(list){ACTIVE=list;filt="all";openN=null;$("th").value=35;$("q
 $("tour").onclick=()=>startTour(STEPS);$("tourS").onclick=()=>startTour(STEPS.filter(x=>QUICK.includes(x.t)));
 $("cnx").onclick=()=>go(ti+1);$("cp").onclick=()=>go(ti-1);$("cx").onclick=()=>go(-1);
 addEventListener("keydown",e=>{if(ti<0)return;if(e.key=="Escape")go(-1);if(e.key=="ArrowRight")go(ti+1);if(e.key=="ArrowLeft"&&ti>0)go(ti-1)});
-{const bar=$("bar"),chk3=()=>bar.classList.toggle("show",Math.max(window.scrollY||0,document.documentElement.scrollTop||0,document.body.scrollTop||0)>480);addEventListener("scroll",chk3,true);chk3()}
+{const bar=$("bar"),apTab=document.querySelector('.tab[data-tab="ap"]'),chk3=()=>bar.classList.toggle("show",Math.max(window.scrollY||0,document.documentElement.scrollTop||0,document.body.scrollTop||0)>480||!!(apTab&&apTab.classList.contains("on")));addEventListener("scroll",chk3,true);if(apTab&&window.MutationObserver)new MutationObserver(chk3).observe(apTab,{attributes:true,attributeFilter:["class"]});chk3()}
 {const dz=$("drop");["dragenter","dragover"].forEach(v=>dz.addEventListener(v,e=>{e.preventDefault();dz.classList.add("over")}));["dragleave","drop"].forEach(v=>dz.addEventListener(v,e=>{e.preventDefault();dz.classList.remove("over")}));dz.addEventListener("drop",e=>analyze(e.dataTransfer.files))}
 {const a=$("apply").onclick,u=$("undo").onclick;$("apply").onclick=()=>{a();if(!LIVE){toast("Applied. Freed "+fB(window._saved));burst()}};$("undo").onclick=()=>{u();if(!LIVE)toast("Rolled back. Folder restored.")}}
 </script>

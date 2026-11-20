@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 270" width="640" height="270" role="img" aria-label="Where the CPU time went" font-family="Segoe UI, Arial, sans-serif">
 <text x="10" y="20" font-size="15" font-weight="700" fill="#14231c">Where the CPU time went</text>
-<path d="M130,135 L130.00,30.00 A105,105 0 0 1 200.56,57.24 Z" fill="#2f9e6d" stroke="#fff" stroke-width="2"/>
-<path d="M130,135 L200.56,57.24 A105,105 0 1 1 28.14,109.53 Z" fill="#3b78b8" stroke="#fff" stroke-width="2"/>
-<path d="M130,135 L28.14,109.53 A105,105 0 0 1 65.92,51.82 Z" fill="#d9902b" stroke="#fff" stroke-width="2"/>
-<path d="M130,135 L65.92,51.82 A105,105 0 0 1 119.99,30.48 Z" fill="#8a6bb8" stroke="#fff" stroke-width="2"/>
-<path d="M130,135 L119.99,30.48 A105,105 0 0 1 130.00,30.00 Z" fill="#c4473d" stroke="#fff" stroke-width="2"/>
-<rect x="270" y="51" width="14" height="14" rx="3" fill="#2f9e6d"/><text x="292" y="62" font-size="13" fill="#14231c">Reading files, hashing, sensitive-data check</text><text x="292" y="78" font-size="12" fill="#5a6d63">11.7% of CPU time (1.90 s)</text>
-<rect x="270" y="93" width="14" height="14" rx="3" fill="#3b78b8"/><text x="292" y="104" font-size="13" fill="#14231c">Finding duplicates</text><text x="292" y="120" font-size="12" fill="#5a6d63">67.2% of CPU time (10.89 s)</text>
-<rect x="270" y="135" width="14" height="14" rx="3" fill="#d9902b"/><text x="292" y="146" font-size="13" fill="#14231c">Scoring and choosing actions</text><text x="292" y="162" font-size="12" fill="#5a6d63">10.7% of CPU time (1.73 s)</text>
-<rect x="270" y="177" width="14" height="14" rx="3" fill="#8a6bb8"/><text x="292" y="188" font-size="13" fill="#14231c">Applying changes (compress or move, verify)</text><text x="292" y="204" font-size="12" fill="#5a6d63">8.9% of CPU time (1.45 s)</text>
-<rect x="270" y="219" width="14" height="14" rx="3" fill="#c4473d"/><text x="292" y="230" font-size="13" fill="#14231c">Rollback (restore and verify)</text><text x="292" y="246" font-size="12" fill="#5a6d63">1.5% of CPU time (0.25 s)</text>
+<path d="M130,135 L130.00,30.00 A105,105 0 0 1 226.98,94.75 Z" fill="#2f9e6d" stroke="#fff" stroke-width="2"/>
+<path d="M130,135 L226.98,94.75 A105,105 0 1 1 28.00,159.93 Z" fill="#3b78b8" stroke="#fff" stroke-width="2"/>
+<path d="M130,135 L28.00,159.93 A105,105 0 0 1 44.88,73.53 Z" fill="#d9902b" stroke="#fff" stroke-width="2"/>
+<path d="M130,135 L44.88,73.53 A105,105 0 0 1 113.93,31.24 Z" fill="#8a6bb8" stroke="#fff" stroke-width="2"/>
+<path d="M130,135 L113.93,31.24 A105,105 0 0 1 130.00,30.00 Z" fill="#c4473d" stroke="#fff" stroke-width="2"/>
+<rect x="270" y="51" width="14" height="14" rx="3" fill="#2f9e6d"/><text x="292" y="62" font-size="13" fill="#14231c">Reading files, hashing, sensitive-data check</text><text x="292" y="78" font-size="12" fill="#5a6d63">18.7% of CPU time (1.99 s)</text>
+<rect x="270" y="93" width="14" height="14" rx="3" fill="#3b78b8"/><text x="292" y="104" font-size="13" fill="#14231c">Finding duplicates</text><text x="292" y="120" font-size="12" fill="#5a6d63">52.4% of CPU time (5.57 s)</text>
+<rect x="270" y="135" width="14" height="14" rx="3" fill="#d9902b"/><text x="292" y="146" font-size="13" fill="#14231c">Scoring and choosing actions</text><text x="292" y="162" font-size="12" fill="#5a6d63">13.8% of CPU time (1.46 s)</text>
+<rect x="270" y="177" width="14" height="14" rx="3" fill="#8a6bb8"/><text x="292" y="188" font-size="13" fill="#14231c">Applying changes (compress or move, verify)</text><text x="292" y="204" font-size="12" fill="#5a6d63">12.6% of CPU time (1.34 s)</text>
+<rect x="270" y="219" width="14" height="14" rx="3" fill="#c4473d"/><text x="292" y="230" font-size="13" fill="#14231c">Rollback (restore and verify)</text><text x="292" y="246" font-size="12" fill="#5a6d63">2.4% of CPU time (0.26 s)</text>
 </svg>
