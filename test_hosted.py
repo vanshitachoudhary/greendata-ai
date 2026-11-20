@@ -20,7 +20,7 @@ def tree_hashes(root):
         for f in files:
             p = os.path.join(d, f)
             with open(p, "rb") as fh:
-                out[os.path.relpath(p, root)] = hashlib.sha256(fh.read()).hexdigest()
+                out[os.path.relpath(p, root).replace(os.sep, "/")] = hashlib.sha256(fh.read()).hexdigest()  # same style as the scan's names
     return out
 
 
